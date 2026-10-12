@@ -1,140 +1,96 @@
 import { expect, test } from "bun:test";
-import { mkdir, mkdtemp, readdir, rm, symlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import plugin from "../src/opencode/index.ts";
-import { Compressor, SCRATCH_MARKER } from "../src/opencode/compressor.ts";
-import { optionsSchema } from "../src/opencode/options.ts";
+import { deadline, parseOptions } from "../src/opencode/options.ts";
 import { SessionMemory } from "../src/opencode/session.ts";
-import { admitHistory, projectHistory } from "../src/opencode/projection.ts";
-import { Store } from "../src/store.ts";
-import { assistant, fixture, user } from "./opencode-fixture.ts";
+import { Session } from "@opencode/schema/session";
+import { assistant, context, fixture, idle, limits, model, prompt, reply, user } from "./opencode-fixture.ts";
 
-test("conflicting or reverted recovery cannot start a compressor and releases its lease", async () => {
-  const root = await mkdtemp(join(tmpdir(), "optchat-recovery-admit-"));
-  const api = fixture(root);
-  const options = optionsSchema.parse({ directory: join(root, "memory"), nodeBytes: 128 });
-  const compressor = new Compressor(api.host.client, 1_000);
-  api.histories.set("s", [user("u")]);
-  const initial = await SessionMemory.open({ id: "s", host: api.host, options, compressor });
-  await initial.close();
-  let store = await Store.open(initial.memory.store.directory);
-  const records = projectHistory(admitHistory([user("u", "s", 1, "unfinished long history ".repeat(100))], "s"));
-  for (const record of records) store.append(record.kind, record.text, record.date, record.metadata);
-  await store.close();
+test("slow summaries hold every request, including an already frozen prefix", async () => {
+  const f = await fixture([user("old"), assistant("answer"), idle(), user("active")]);
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<string>();
   try {
-    await expect(SessionMemory.open({ id: "s", host: api.host, options, compressor })).rejects.toThrow("conflicts");
-    expect(api.prompts).toBe(0);
-    expect(api.sessions.size).toBe(2);
-    store = await Store.open(initial.memory.store.directory);
-    await store.close();
-    const info = api.sessions.get("s");
-    if (!info) throw new Error("fixture session missing");
-    info.revert = { messageID: "u" };
-    await expect(SessionMemory.open({ id: "s", host: api.host, options, compressor })).rejects.toThrow("reverted");
-    expect(api.prompts).toBe(0);
-  } finally { compressor.close(); api.close(); await rm(root, { recursive: true, force: true }); }
+    const first = context([prompt("old"), reply("answer"), prompt("active")]);
+    await f.owner.transform(first, limits, new AbortController().signal);
+    const view = first.messages[0];
+    f.state.generate = async (_input, signal) => { entered.resolve(); return deadline(release.promise, signal); };
+    const long = "new public output ".repeat(200);
+    f.state.history = [...f.state.history, assistant("long", long), user("steer")];
+    const event = context([prompt("old"), reply("answer"), prompt("active"), reply("long", long), prompt("steer")]);
+    const original = JSON.stringify(event);
+    let admitted = false;
+    const waiting = f.owner.transform(event, limits, new AbortController().signal).then(() => { admitted = true; });
+    await entered.promise;
+    expect(admitted).toBe(false);
+    expect(JSON.stringify(event)).toBe(original);
+    release.resolve("short new output");
+    await waiting;
+    expect(event.messages[0]).toEqual(view);
+    expect(event.messages.slice(-3)).toEqual([prompt("active"), reply("long", long), prompt("steer")]);
+  } finally { release.resolve("short"); await f.close(); }
 });
 
-test("canonical steering ahead of the host snapshot is captured without poisoning the live turn", async () => {
-  const root = await mkdtemp(join(tmpdir(), "optchat-steering-admit-"));
-  const api = fixture(root);
-  const firstUser = user("u", "s", 1, "original model context ".repeat(100));
-  const steering = user("steer", "s", 4);
-  if (steering.info.role === "user") steering.info.model.modelID = "later-steering-model";
-  api.histories.set("s", [firstUser, steering]);
-  const options = optionsSchema.parse({ directory: join(root, "memory"), nodeBytes: 128 });
-  const compressor = new Compressor(api.host.client, 1_000);
-  const owner = await SessionMemory.open({ id: "s", host: api.host, options, compressor });
+test("failed compression refuses raw fallback and retries the same durable source without append", async () => {
+  const long = "long archived narrative ".repeat(200);
+  const f = await fixture([user("old", long), assistant("answer"), idle(), user("active")], async () => { throw new Error("offline"); });
   try {
-    const first = [structuredClone(firstUser)];
-    await owner.transform(first);
-    expect(first).toHaveLength(1);
-    expect(api.requestedModels.length).toBeGreaterThan(0);
-    expect(api.requestedModels.every((model) => JSON.stringify(model) === JSON.stringify({ providerID: "fixture", modelID: "default-user-model" }))).toBe(true);
-    const next = [structuredClone(firstUser), steering];
-    await owner.transform(next);
-    expect(next).toHaveLength(2);
-    expect(owner.memory.store.messages).toHaveLength(2);
-  } finally { compressor.close(); await owner.close(); api.close(); await rm(root, { recursive: true, force: true }); }
+    const event = context([prompt("old", long), reply("answer"), prompt("active")]);
+    const original = JSON.stringify(event);
+    await expect(f.owner.transform(event, limits, new AbortController().signal)).rejects.toThrow("summary work failed");
+    expect(JSON.stringify(event)).toBe(original);
+    const count = f.owner.store.messages.length;
+    f.state.generate = async () => "recovered short summary";
+    await f.owner.transform(event, limits, new AbortController().signal);
+    expect(f.owner.store.messages.length).toBe(count);
+    expect(JSON.stringify(event.messages)).not.toContain(long);
+    expect(f.owner.memory.zoom(0, 1).text).toBe(long);
+  } finally { await f.close(); }
 });
 
-test("a crash orphan before a new user fails closed without advancing inference or dropping tool results", async () => {
-  const root = await mkdtemp(join(tmpdir(), "optchat-orphan-admit-"));
-  const api = fixture(root);
-  const tools = assistant("tools");
-  if (tools.info.role === "assistant") tools.info.finish = "tool-calls";
-  tools.parts = [{ type: "tool", id: "t", sessionID: "s", messageID: "tools", callID: "c", tool: "date",
-    state: { status: "completed", input: { id: 0 }, output: "2026-01-01", title: "date", metadata: {}, time: { start: 2, end: 3 } } }];
-  const orphan = assistant("orphan");
-  if (orphan.info.role === "assistant") { delete orphan.info.time.completed; delete orphan.info.finish; }
-  orphan.parts = [];
-  const input = [user("u"), tools, orphan, user("resumed", "s", 4)];
-  api.histories.set("s", structuredClone(input));
-  const compressor = new Compressor(api.host.client, 1_000);
-  const owner = await SessionMemory.open({ id: "s", host: api.host, options: optionsSchema.parse({ directory: join(root, "memory") }), compressor });
+test("cancellation interrupts compression, frees the queue and allows retry", async () => {
+  const entered = Promise.withResolvers<void>();
+  const cancelled = Promise.withResolvers<void>();
+  const long = "cancelled source ".repeat(200);
+  const f = await fixture([user("old", long), idle(), user("active")], async (_input, signal) => {
+    entered.resolve();
+    signal.addEventListener("abort", () => cancelled.resolve(), { once: true });
+    return deadline(new Promise<string>(() => undefined), signal);
+  });
   try {
-    const before = structuredClone(input);
-    await expect(owner.transform(input)).rejects.toThrow("incomplete historical assistant");
-    expect(input).toEqual(before);
-    expect(owner.memory.store.messages.map((record) => record.kind)).toEqual(["user", "tool", "echo"]);
-    expect(api.prompts).toBe(0);
-  } finally { compressor.close(); await owner.close(); api.close(); await rm(root, { recursive: true, force: true }); }
+    const controller = new AbortController();
+    const event = context([prompt("old", long), prompt("active")]);
+    const original = JSON.stringify(event);
+    const result = f.owner.transform(event, limits, controller.signal);
+    await entered.promise;
+    controller.abort();
+    await expect(result).rejects.toThrow("cancelled");
+    await cancelled.promise;
+    f.state.generate = async () => "retry succeeded";
+    const retry = context([prompt("old", long), prompt("active")]);
+    await f.owner.transform(retry, limits, new AbortController().signal);
+    expect(JSON.stringify(event)).toBe(original);
+    expect(JSON.stringify(retry.messages)).toContain("<chat>");
+  } finally { await f.close(); }
 });
 
-test("tool admission suspended in an SDK lookup cannot open a store after disposal", async () => {
-  const root = await mkdtemp(join(tmpdir(), "optchat-dispose-admit-"));
-  const api = fixture(root);
-  const gate = api.holdGet("s");
-  const hooks = await plugin(api.host, { directory: join(root, "memory") });
-  const date = hooks.tool?.date;
-  if (!date) throw new Error("date tool missing");
-  const request = date.execute({ id: 0 }, { sessionID: "s", messageID: "u", agent: "build", directory: root,
-    worktree: root, abort: new AbortController().signal, metadata() {}, async ask() {} }).then(
-      () => ({ status: "fulfilled" as const }),
-      (error: unknown) => ({ status: "rejected" as const, error }),
-    );
+test("one blocked session does not hold another session's admission", async () => {
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<string>();
+  const f = await fixture([user("old", "slow ".repeat(300)), idle(), user("active")], async (_input, signal) => {
+    entered.resolve(); return deadline(release.promise, signal);
+  });
+  const other = await SessionMemory.open({ id: Session.ID.make("ses_other"), model, options: f.options,
+    host: { ...f.host, history: async () => [user("independent")] } });
   try {
-    await gate.entered;
-    await hooks.dispose?.();
-    gate.release();
-    const outcome = await request;
-    if (outcome.status !== "rejected" || !(outcome.error instanceof Error)) throw new Error("expected admission rejection");
-    expect(outcome.error.message).toContain("closing");
-    expect(await readdir(root)).toEqual([]);
-  } finally { gate.release(); api.close(); await rm(root, { recursive: true, force: true }); }
+    const blocked = f.owner.transform(context([prompt("old", "slow ".repeat(300)), prompt("active")]), limits, new AbortController().signal);
+    await entered.promise;
+    const event = context([prompt("independent")]);
+    await other.transform({ ...event, sessionID: Session.ID.make("ses_other") }, limits, new AbortController().signal);
+    release.resolve("short history");
+    await blocked;
+  } finally { release.resolve("short"); await other.close(); await f.close(); }
 });
 
-test("a title marker cannot authorize unowned child bypass or deletion", async () => {
-  const root = await mkdtemp(join(tmpdir(), "optchat-child-admit-"));
-  const api = fixture(root);
-  const compressor = new Compressor(api.host.client, 1_000);
-  try {
-    const child = api.sessions.get("other");
-    if (!child) throw new Error("fixture child missing");
-    child.parentID = "s";
-    expect(await compressor.bypass("other")).toBe(false);
-    child.title = `${SCRATCH_MARKER} 01234567-0123-4567-89ab-0123456789ab`;
-    await expect(compressor.bypass("other")).rejects.toThrow("unowned");
-    expect(api.deleted).toHaveLength(0);
-  } finally { compressor.close(); api.close(); await rm(root, { recursive: true, force: true }); }
-});
-
-test("a project symlink and a nested invocation reopen the same canonical session store", async () => {
-  const root = await mkdtemp(join(tmpdir(), "optchat-project-admit-"));
-  const project = join(root, "project");
-  await mkdir(join(project, "nested"), { recursive: true });
-  await symlink(project, join(root, "alias"));
-  const api = fixture(project);
-  api.histories.set("s", [user("u")]);
-  const options = optionsSchema.parse({ directory: join(root, "memory") });
-  const compressor = new Compressor(api.host.client, 1_000);
-  const first = await SessionMemory.open({ id: "s", host: api.host, options, compressor });
-  await first.transform([user("u")]);
-  await first.close();
-  const second = await SessionMemory.open({ id: "s", host: { ...api.host, worktree: join(root, "alias"), directory: join(project, "nested") }, options, compressor });
-  try {
-    expect(second.memory.store.directory).toBe(first.memory.store.directory);
-    expect(second.memory.store.messages).toHaveLength(1);
-  } finally { compressor.close(); await second.close(); api.close(); await rm(root, { recursive: true, force: true }); }
+test("v2 options accept native model refs and reject legacy compatibility keys", () => {
+  expect(String(parseOptions({ directory: "/tmp/archive", model: { providerID: "fixture", id: "compact" } }).model?.id)).toBe("compact");
+  expect(() => parseOptions({ directory: "/tmp/archive", model: { providerID: "fixture", modelID: "compact" } })).toThrow();
 });

@@ -22,11 +22,11 @@ jobs:
         with:
           bun-version: 1.4.0
       - name: Install pinned lockfile
-        run: bun install --frozen-lockfile
+        run: bun install --frozen-lockfile --ignore-scripts
       - name: Upgrade SDK cohort to latest (ephemeral, not saved)
         if: matrix.sdk == 'latest'
         run: >-
-          bun add --no-save
+          bun add --no-save --ignore-scripts
           @oh-my-pi/pi-ai@latest
           @oh-my-pi/pi-catalog@latest
           @oh-my-pi/pi-coding-agent@latest
@@ -39,7 +39,7 @@ jobs:
         env:
           OPTCHAT_SMOKE_OMP: ./node_modules/.bin/omp
   opencode:
-    name: OpenCode 1.19.0 loopback smoke
+    name: OpenCode 2.0.27 loopback smoke
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -54,13 +54,14 @@ jobs:
           mkdir -p "$RUNNER_TEMP/optchat-opencode"
           cd "$RUNNER_TEMP/optchat-opencode"
           curl --fail --location --retry 3 \
-            https://github.com/anomalyco/opencode/releases/download/v1.19.0/opencode-linux-x64-baseline.tar.gz \
-            --output opencode.tar.gz
+            https://registry.npmjs.org/@opencode/cli-linux-x64-baseline/-/cli-linux-x64-baseline-2.0.27.tgz \
+            --output opencode.tgz
           printf '%s  %s\n' \
-            6334d70db3990721ea454357e9cf2573c8685524ad7769af9d52cbffb7008438 \
-            opencode.tar.gz | sha256sum --check
-          tar -xzf opencode.tar.gz
+            acb0c26ebae126d66fe1683b09209a2b29a904a13177c65d5714e9d88dbf7257 \
+            opencode.tgz | sha256sum --check
+          tar -xzf opencode.tgz
+          ./package/bin/opencode --version
       - name: Verify the real host with a local model fixture
         run: bun run smoke:opencode
         env:
-          OPTCHAT_SMOKE_OPENCODE: ${{ runner.temp }}/optchat-opencode/opencode
+          OPTCHAT_SMOKE_OPENCODE: ${{ runner.temp }}/optchat-opencode/package/bin/opencode

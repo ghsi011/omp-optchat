@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
-import { tool } from "@opencode-ai/plugin";
+import { join } from "node:path";
+import { OpenCode, type OpenCodeClient, type SessionMessageInfo } from "@opencode/client";
+import { Service } from "@opencode/client/service";
 
-const z = tool.schema;
-export class SmokeFailure extends Error { override readonly name = "OpenCodeSmokeFailure"; }
+export class SmokeFailure extends Error {
+  override readonly name = "OpenCodeSmokeFailure";
+  constructor(message: string, readonly outcome?: "failed" | "interrupted") { super(message); }
+}
 export function observed<T>(task: Promise<T>) {
   return task.then((value) => ({ ok: true, value } as const), (error: unknown) => ({ ok: false, error } as const));
 }
@@ -10,6 +14,7 @@ export async function refused(task: Promise<unknown>, label: string): Promise<st
   const result = await observed(task);
   if (result.ok) assert.fail(`${label} must reject`);
   if (!(result.error instanceof SmokeFailure)) throw result.error;
+  assert.equal(result.error.outcome, "failed", `${label} must have a native failed outcome`);
   return result.error.message;
 }
 export async function bounded<T>(task: Promise<T>, label: string, milliseconds = 90_000): Promise<T> {
@@ -20,77 +25,87 @@ export async function bounded<T>(task: Promise<T>, label: string, milliseconds =
     })]);
   } finally { clearTimeout(timer); }
 }
+export async function eventually(predicate: () => Promise<boolean>, label: string, milliseconds = 5_000): Promise<void> {
+  const until = performance.now() + milliseconds;
+  while (performance.now() < until) {
+    if (await predicate()) return;
+    await Bun.sleep(10);
+  }
+  throw new SmokeFailure(`${label} timed out`);
+}
 
 export class Host {
   readonly child: Bun.Subprocess<"ignore", "pipe", "pipe">;
-  readonly ready = Promise.withResolvers<string>();
+  readonly ready: Promise<OpenCodeClient>;
   diagnostics = "";
-  readonly streams: Promise<void>[];
+  readonly streams: readonly Promise<void>[];
   constructor(executable: string, readonly workspace: string, env: NodeJS.ProcessEnv) {
-    const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response(null, { status: 503 }) });
-    const port = reservation.port;
-    reservation.stop(true);
-    this.child = Bun.spawn([executable, "--print-logs", "--log-level=ERROR", "serve", "--hostname=127.0.0.1", `--port=${port}`, "--no-mdns"],
+    const state = env.XDG_STATE_HOME;
+    assert(state, "host state directory must be explicitly isolated");
+    this.child = Bun.spawn([executable, "--log-level=debug", "--print-logs", "serve", "--service", "--hostname=127.0.0.1", "--port=0"],
       { cwd: workspace, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
     this.streams = [this.consume(this.child.stdout), this.consume(this.child.stderr)];
-    void this.child.exited.then((code) => this.ready.reject(new SmokeFailure(`host exited before ready: ${code}`)));
+    this.ready = this.connect(join(state, "opencode", "service.json"));
+  }
+  private async connect(file: string): Promise<OpenCodeClient> {
+    const limit = performance.now() + 30_000;
+    while (performance.now() < limit) {
+      if (this.child.exitCode !== null) throw new SmokeFailure(`host exited before ready: ${this.child.exitCode}`);
+      const endpoint = await Service.discover({ file, version: "2.0.27" });
+      if (endpoint) {
+        assert.equal(new URL(endpoint.url).hostname, "127.0.0.1", "test host must listen only on loopback");
+        return OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint) });
+      }
+      await Bun.sleep(50);
+    }
+    throw new SmokeFailure(`host startup timed out: ${this.diagnostics}`);
   }
   private async consume(stream: ReadableStream<Uint8Array>): Promise<void> {
     const decoder = new TextDecoder();
-    for await (const chunk of stream) {
-      this.diagnostics = (this.diagnostics + decoder.decode(chunk, { stream: true })).slice(-16_384);
-      const url = /server listening on (http:\/\/127\.0\.0\.1:\d+)/.exec(this.diagnostics)?.[1];
-      if (url) this.ready.resolve(url);
-    }
+    for await (const chunk of stream) this.diagnostics = (this.diagnostics + decoder.decode(chunk, { stream: true })).slice(-32_768);
   }
-  async request(path: string, body?: Readonly<Record<string, unknown>>): Promise<unknown> {
-    const base = await bounded(this.ready.promise, "host startup", 30_000);
-    const url = new URL(path, base);
-    url.searchParams.set("directory", this.workspace);
-    const response = await fetch(url, { method: body ? "POST" : "GET", signal: AbortSignal.timeout(90_000),
-      headers: { "content-type": "application/json", "x-opencode-directory": this.workspace },
-      ...(body ? { body: JSON.stringify(body) } : {}) });
-    const text = await response.text();
-    if (!response.ok) throw new SmokeFailure(`${path}: HTTP ${response.status}: ${text.slice(0, 2048)}`);
-    return text ? JSON.parse(text) : null;
+  async create(title = "OptChat smoke", modelID = "chat") {
+    return (await this.ready).session.create({ title, location: { directory: this.workspace }, model: { providerID: "fixture", id: modelID } });
   }
-  async prompt(session: string, marker: string, modelID = "chat"): Promise<void> {
-    const answer = z.object({ info: z.object({ error: z.unknown().optional() }).passthrough() }).passthrough()
-      .parse(await this.request(`/session/${session}/message`, { model: { providerID: "fixture", modelID },
-        parts: [{ type: "text", text: marker }] }));
-    if (answer.info.error !== undefined) throw new SmokeFailure(`assistant error: ${JSON.stringify(answer.info.error)}`);
+  async history(sessionID: string): Promise<SessionMessageInfo[]> {
+    const client = await this.ready;
+    const messages: SessionMessageInfo[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await client.message.list({ sessionID, limit: 200, ...(cursor ? { cursor } : { order: "asc" }) });
+      messages.push(...page.data);
+      cursor = page.cursor.next ?? undefined;
+    } while (cursor);
+    return messages;
   }
-  async dispose(): Promise<void> {
-    const controller = new AbortController();
-    const response = await fetch(new URL("/global/event", await this.ready.promise),
-      { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]) });
-    assert(response.ok && response.body, "global disposal event stream must be available");
-    const events = response.body;
-    const received = (async () => {
-      let buffer = "";
-      const decoder = new TextDecoder();
-      for await (const chunk of events) {
-        buffer += decoder.decode(chunk, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.startsWith("data:")) continue;
-          const event = z.object({ payload: z.object({ type: z.string(), properties: z.object({ directory: z.string().optional() }).passthrough().optional() }) })
-            .parse(JSON.parse(line.slice(5)));
-          if (event.payload.type === "server.instance.disposed" && event.payload.properties?.directory === this.workspace) return;
-        }
-      }
-      throw new SmokeFailure("event stream closed before instance disposal");
-    })().then(() => ({ ok: true } as const), (error: unknown) => ({ ok: false, error } as const));
-    try {
-      // OpenCode v1.19.0 sends this response before teardown: server/routes/instance/httpapi/lifecycle.ts:20-28.
-      await this.request("/instance/dispose", {});
-      const result = await received;
-      if (!result.ok) throw result.error;
-    } finally { controller.abort(); }
+  async settle(sessionID: string, after: number): Promise<void> {
+    const client = await this.ready;
+    await client.session.wait({ sessionID }, { signal: AbortSignal.timeout(90_000) });
+    const tail = (await this.history(sessionID)).slice(after);
+    const idle = tail.findLast((message) => message.type === "idle");
+    if (!idle || idle.type !== "idle") throw new SmokeFailure("host became inactive without an idle marker");
+    if (idle.outcome !== "succeeded") throw new SmokeFailure(`turn ${idle.outcome}: ${idle.error?.message ?? "no error detail"}`, idle.outcome);
+    const failure = tail.find((message) => message.type === "assistant" && message.error);
+    if (failure?.type === "assistant") throw new SmokeFailure(`assistant error: ${JSON.stringify(failure.error)}`);
   }
-  async stop(): Promise<void> {
-    if (this.child.exitCode === null) this.child.kill("SIGTERM");
+  async prompt(sessionID: string, text: string, modelID = "chat"): Promise<void> {
+    const client = await this.ready;
+    const before = (await this.history(sessionID)).length;
+    const session = await client.session.get({ sessionID });
+    if (session.model?.id !== modelID) await client.session.switchModel({ sessionID, model: { providerID: "fixture", id: modelID } });
+    await client.session.prompt({ sessionID, text });
+    await this.settle(sessionID, before);
+  }
+  async compact(sessionID: string): Promise<void> {
+    const before = (await this.history(sessionID)).length;
+    await (await this.ready).session.compact({ sessionID });
+    await this.settle(sessionID, before);
+  }
+  async interrupt(sessionID: string): Promise<void> {
+    assert.equal((await (await this.ready).session.interrupt({ sessionID })).interrupted, true);
+  }
+  async stop(signal: "SIGTERM" | "SIGKILL" = "SIGTERM"): Promise<void> {
+    if (this.child.exitCode === null) this.child.kill(signal);
     try { await bounded(this.child.exited, "host shutdown", 5_000); }
     catch (error) {
       if (!(error instanceof SmokeFailure)) throw error;
