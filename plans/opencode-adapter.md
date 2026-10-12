@@ -20,7 +20,7 @@ The first supported runtime is Linux, including Ubuntu in WSL on Windows. The up
 - [x] (2026-10-12 17:10Z) Pass the real OpenCode CLI smoke, including capacity, cancellation and interrupted-history refusal.
 - [x] (2026-10-12 17:10Z) Review independently against requirements and repository standards, then correct findings.
 - [x] (2026-10-12 17:10Z) Document installation and version limits; rehearse the current upstream update in a disposable checkout.
-- [ ] Commit and push the feature branch, verify the remote commit, and create only a draft PR in the fork if useful.
+- [x] (2026-10-12 17:13Z) Commit and push the feature branch, verify the remote commit, and create draft PR #1 in the fork.
 
 ## Surprises & Discoveries
 
@@ -98,8 +98,12 @@ The existing core constructor is `new Memory(store, summarize, options)`. `Summa
 
 The final feature passes type checking, the static audit of 18 new TypeScript files, and 1,450 tests with three existing skips and zero failures. Both actual-host smoke fixtures pass. OpenCode verification covers three processes, all four tools, durable original retrieval, completed-turn restart, slow and failed summaries, independent sessions, cancellation, capacity refusal, and explicit refusal after an unfinished crash record. The initial missing-workflow conclusion is superseded by the official Poteto Mode discovery.
 
-The adapter adds eight host-specific modules and three small shared-core seams. OMP discovery and System One remain unchanged. Supported OpenCode behavior is memory-only and text-only on Linux/WSL; experimental hooks, opaque provider state and unfinished host records remain explicit limits. The sync rehearsal found upstream unchanged, verified ancestry, and produced no merge or diff. It does not predict future conflict rates. Publication and remote verification remain the final task.
+The adapter adds eight host-specific modules and three small shared-core seams. OMP discovery and System One remain unchanged. Supported OpenCode behavior is memory-only and text-only on Linux/WSL; experimental hooks, opaque provider state and unfinished host records remain explicit limits. The sync rehearsal found upstream unchanged, verified ancestry, and produced no merge or diff. It does not predict future conflict rates.
+
+The feature is published on `ghsi011/omp-optchat` branch `feat/opencode-adapter`. [Draft PR #1](https://github.com/ghsi011/omp-optchat/pull/1) targets the fork's `main`, with no upstream PR or merge. The first published commit was checked against `git ls-remote` and the PR head. Further OpenCode versions and unsupported provider state need a separate compatibility change and the same real-host checks.
 
 Revision note: created after source inspection and official workflow recovery to make the implementation and its acceptance checks reviewable before code.
 
 Revision note (2026-10-12 17:10Z): recorded final test and host evidence, independent corrections, the interrupted-history refusal boundary and the unchanged-upstream rehearsal.
+
+Revision note (2026-10-12 17:13Z): recorded the verified fork push and draft pull request.
