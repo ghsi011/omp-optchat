@@ -49,11 +49,11 @@ bun install --frozen-lockfile --ignore-scripts
 bun run typecheck
 bun test tests
 OPTCHAT_SMOKE_OMP=./node_modules/.bin/omp bun run smoke
-OPTCHAT_SMOKE_OPENCODE=/absolute/path/to/opencode-1.19.0 bun run smoke:opencode
+OPTCHAT_SMOKE_OPENCODE=/absolute/path/to/opencode-2.0.27 bun run smoke:opencode
 git diff --check
 ```
 
-The smoke fixtures must use local synthetic models and isolated configuration. Inspect the upstream diff for new execution paths before running unfamiliar code. A later OpenCode upgrade is a separate compatibility change: pin its SDK and CLI together, read the changed hook call sites, and rerun the real-host smoke.
+The smoke fixtures must use local synthetic models and isolated configuration. Inspect the upstream diff for new execution paths before running unfamiliar code. A later OpenCode upgrade is a separate compatibility change. Pin its plugin, client and CLI together, inspect the host's Effect version, read the changed hook and history call sites, and rerun the real-host smoke. OpenCode 1.x is outside this adapter's support target.
 
 After a successful rehearsal, commit the local merge, push the `sync/upstream-YYYYMMDD` branch to **origin**, and open a draft pull request in `ghsi011/omp-optchat` with base `feat/opencode-adapter`. Review and approval remain separate from this procedure. Never force-push the feature branch, reset it to upstream, or merge the PR automatically.
 

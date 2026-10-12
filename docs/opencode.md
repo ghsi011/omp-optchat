@@ -1,20 +1,20 @@
-# OpenCode adapter
+# OpenCode 2 adapter
 
-This fork adds OpenCode support while keeping the original OMP entry point. The adapter reuses OptChat's append-only history, binary summary tree and memory tools. OpenCode's own session transcript remains available.
+This fork adds OpenCode support while retaining the original OMP entry point. It reuses OptChat's append-only archive, binary summary tree and memory tools. The host transcript remains available.
 
 ## Supported runtime
 
-The compatibility target is **OpenCode 1.19.0**, with plugin and SDK packages pinned to the same version. Development uses **Bun 1.4.0**; the upstream package requires Bun 1.3.14 or newer. The adapter uses experimental OpenCode hooks, so other OpenCode versions need the real-host smoke test before use.
+The target is **OpenCode 2.0.27**, with `@opencode/plugin` and `@opencode/client` 2.0.27 and the host's Effect 4.0.1. Development uses **Bun 1.4.0**. OpenCode 1.x is unsupported. A different version requires source inspection and the real-host smoke before use.
 
-The initial adapter supports text conversations and text tool results. Active file/media attachments and known opaque encrypted, redacted or remotely referenced reasoning are rejected because the public hooks cannot bound their expanded model input. Ordinary textual reasoning and signatures can remain in the live turn. Historical attachment pointers can still be archived and searched.
+Run the adapter in Linux or WSL. Store its memory in the Linux filesystem, such as `$HOME/.local/state`. Native Windows and storage under `/mnt/c` are unsupported by the shared Store, which relies on Linux procfs, POSIX ownership and private permissions, directory fsync, and an abstract Unix socket writer lease. OpenCode 2 itself can run on Windows; that does not make this Store portable.
 
-Use Linux or Linux inside WSL. On Windows, run OpenCode and keep the state directory in the WSL Linux filesystem, for example under `$HOME/.local/state`. Native Windows and state directories under `/mnt/c` are unsupported. The shared Store relies on Linux procfs, POSIX ownership and private permissions, file and directory fsync, and an abstract Unix socket writer lease.
+Each session has separate memory. Resuming a session reopens it; ordinary subagent sessions remain separate. Keep OMP and OpenCode storage roots separate because the adapter's source metadata is unknown to older upstream readers.
 
-Each OpenCode session has its own memory within the selected directory. Resuming a session reopens that memory. A new session or ordinary task child starts separate memory. OMP stores stay separate because this adapter adds source metadata that older upstream readers do not understand.
+## Install
 
-## Install from this fork
+Install OpenCode 2 using the [official instructions](https://opencode.ai/v2/docs/). Verify `opencode --version` reports 2.0.27. The [verification guide](development/opencode-verification.md) records the official binary and checksum used here.
 
-Run these commands inside Linux or WSL. Use a separate checkout if you already have an OMP checkout with local work.
+Run in Linux or WSL. Use a separate checkout if an existing checkout has local changes.
 
 ```sh
 git clone https://github.com/ghsi011/omp-optchat.git
@@ -23,83 +23,71 @@ git switch feat/opencode-adapter
 bun install --frozen-lockfile --ignore-scripts
 ```
 
-Add the plugin to your project's `opencode.json`. Replace both example paths with absolute Linux paths. The first path names the checked-out TypeScript entry point; the second is a private directory for durable memory.
+Add this native v2 configuration to the project's `opencode.json`. Replace both paths with absolute Linux paths. The plugin URL must name the `src/opencode` directory, not its `index.ts` file. Keep OptChat last among plugins that modify context.
 
 ```json
 {
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": [
-    [
-      "file:///home/me/src/omp-optchat/src/opencode/index.ts",
-      {
-        "directory": "/home/me/.local/state/optchat-opencode"
-      }
-    ]
+  "compaction": { "auto": false },
+  "plugins": [
+    {
+      "package": "file:///home/me/src/omp-optchat/src/opencode",
+      "options": { "directory": "/home/me/.local/state/optchat-opencode" }
+    }
   ]
 }
 ```
 
-Model access comes through your existing OpenCode configuration. By default the compressor uses the model from the real user message. To choose a different configured model, add `"model": { "providerID": "your-provider", "modelID": "your-model" }` to the plugin options. The adapter adds no provider client, API-key variable or credential store.
+**Set `compaction.auto` to `false`.** This native setting disables automatic host compaction and overflow recovery. V2 offers no mutable plugin configuration hook, so the adapter cannot set or independently verify it. OptChat also rejects host compaction requests before a completed summary can replace history. It changes no global settings.
 
-Compression makes model calls for long records and tree merges. There is no measured cost-saving claim. Use an appropriate configured model and account for these calls before enabling the adapter on a large existing session.
+Model access uses existing OpenCode configuration. By default compression uses the active model. Its `model` option can select another configured model, for example `{"providerID":"your-provider","id":"your-model"}`. The adapter adds no provider client, API-key variable or credential store. It calls stateless host generation, without scratch sessions or agents. Long records and tree merges cost model calls; no cost or quality savings are claimed from synthetic tests.
 
-## Behavior and boundaries
+## History and recovery
 
-Before inference, the adapter reads canonical OpenCode history, commits supported public records, and waits for settled summaries. The model receives the prior-history view followed by its active user and tool loop. Completed pieces of that live loop may already be in the archive; prefix rendering prevents those records from also appearing in the historical view. The same process freezes the view throughout one response chain. After restart the exact formatting may change, but its historical coverage must remain the same.
+Before primary inference, the adapter reads durable history, validates the archived prefix, appends supported public records, and waits for required summaries. The request contains a historical view and the complete active turn. Durable idle markers delimit completed turns, including steering messages and tool continuations. Source identities and text are committed together, preventing duplicate appends after replay.
 
-The memory tools operate on the calling session's archive:
+In the pinned [history reader](https://github.com/anomalyco/opencode/blob/4d9678a79d6367ad1257c258049075e7a2d0c6c8/packages/core/src/session/history.ts), the only head cut is completed host compaction, and its marker stays in the result. OptChat rejects completed compaction. Start a new session if the host already compacted one. A failed compaction attempt alone does not establish lost history.
+
+Removed, reordered, reverted or changed archived records are rejected. OptChat never rewrites its log to match a destructive host edit. Keep the old transcript and archive for inspection. The real-host fixture verifies automatic recovery after a process is killed during a tool loop: the completed calls/results remain intact, the host adds one restart notice, and one new provider request completes the turn without duplicate archive records. A genuinely unfinished assistant that prevents stable capture of a later incoming prompt is refused; this tested recovery is not a promise that every interruption can resume.
+
+Reasoning is excluded from the public archive. Public text, tool inputs and terminal outputs, including failures, are retained. Text already truncated by OpenCode cannot be recovered. Attachments are pointers and metadata, not retained file bytes or permission to fetch arbitrary paths. Active media and opaque provider state require refusal when their expanded input cannot be bounded.
+
+This adapter is memory-only. OMP's System One gates and `chat_recall` remain in the original adapter. OpenCode permissions control its tools. OMP discovery remains intact.
+
+## Memory tools
 
 | Tool | Input and result |
 | --- | --- |
-| `zoom` | `id`, power-of-two `n`, optional `offset` and `depth`; reads saved tree children or a page of exact original text when `n=1`. |
-| `date` | `id`; returns the original record timestamp. |
-| `chat_search` | `query`, optional `kind`, `limit` and `before`; finds exact words in original text and returns IDs for `zoom`. |
-| `work` | Optional numeric `id` and `offset`; lists captured task reports or reads a report's original text. |
+| `zoom` | `id`, power-of-two `n`, optional `offset` and `depth`; saved tree children or original text when `n=1`. |
+| `date` | `id`; original record timestamp. |
+| `chat_search` | `query`, optional `kind`, `limit` and `before`; exact words in raw text and IDs for `zoom`. |
+| `work` | Optional numeric `id` and `offset`; captured subagent reports or a report's original text. |
 
-Reasoning parts are excluded. Original tool inputs and canonical terminal outputs, including failures, are retained. Output that OpenCode truncated before persistence cannot be recovered by this adapter. Attachments are recorded as pointers and metadata; file bytes are not archived, and an inline data URL is represented by its digest. File references do not grant permission to read arbitrary local paths or URLs.
+## Waiting and capacity
 
-The first release is memory-only. OMP's System One rules, prefetch, value scoring, tool gate and `chat_recall` remain in the OMP adapter. OpenCode's own permissions still control its tools. OMP's commands, defaults and package discovery remain unchanged.
+The native Effect context hook is awaited before primary generation. Every managed step waits for required leaf summaries and tree merges, including later steps in a tool loop. A held summary cannot admit the old raw transcript. Failure, deadline expiry or an unrenderable prefix stops the request. Independent sessions own separate queues and stores.
 
-Automatic OpenCode compaction and pruning are disabled in the plugin's in-memory configuration. Do not request manual OpenCode compaction while this adapter is enabled: OpenCode persists its compaction marker before the plugin can reject the operation, so that session then requires a fresh session. Sessions that already contain host compaction, a revert marker, removed records, reordered history or changed terminal content are rejected instead of silently replacing the archive. Retain the old archive for inspection. Removing the plugin restores ordinary OpenCode behavior, but does not migrate its memory back into the host transcript.
+Admission measures serialized UTF-8 bytes of replacement messages, system content and tool schemas. It compares them with the current model's context/input limits and resolved output allocation, plus `contextReserveBytes` (default 16,384). One observed byte counts as one conservative input-budget unit. Invalid or unknown model limits are rejected.
 
-Archive corruption, a writer conflict or failed compression blocks managed inference. These failures do not fall back to a long transcript or partial summary. Close other writers or resolve the reported storage problem, then restart. Do not edit or truncate OptChat logs to clear an error.
+This byte policy is not an exact tokenizer or a universal provider guarantee. Later plugins, provider serialization and hidden provider state can alter the request. Keep OptChat last and retain a suitable reserve. The pinned [request builder](https://github.com/anomalyco/opencode/blob/4d9678a79d6367ad1257c258049075e7a2d0c6c8/packages/core/src/session/model-request.ts) and [hook types](https://github.com/anomalyco/opencode/blob/4d9678a79d6367ad1257c258049075e7a2d0c6c8/packages/plugin/src/effect/session.ts) define the observed boundary.
 
-Completed-turn restart restores the archive and tree without duplicate capture. If a process dies during a response, OpenCode can retain an unfinished assistant record with no completion or error marker. The adapter cannot prove that record is immutable. When it blocks capture of the next incoming user, continuation is refused before a model call and requires a fresh session. The old canonical transcript and durable archive are retained. Previously pruned tool results still inside an active loop also require a fresh session.
+If the settled view and full active turn still exceed policy, the adapter refuses. It never truncates raw text, drops a tool pair, or substitutes a partial summary. Reduce `viewBytes`, reduce active-turn output, or choose a larger model. Lowering the reserve changes policy, not evidence of provider acceptance.
 
-The compressor uses owned child sessions and a hidden agent with tools denied. Shutdown cancels compression and closes stores. Cleanup only deletes scratch children created by the current process. Unproved scratch children left by a crash are retained; ordinary task children and parent sessions are never deleted. The public hooks supply no parent cancellation signal, so a cancelled parent can leave summary work running until completion or the configured deadline. Valid completed summaries remain reusable.
-
-## Waiting and context headroom
-
-Every managed model step waits for OptChat's required summaries before OpenCode converts its messages for the provider. If a prefix is still too large while existing tree merges are running, admission waits within the configured deadline. A summary failure, stalled prefix or expired deadline stops the request. Slow compression in one session does not block another session.
-
-After the view and active tool loop are ready, the adapter checks their serialized UTF-8 bytes, observed system text and tool definitions against the current model's context/input limit and effective output allocation. `contextReserveBytes` adds an allowance for unobserved overhead; its default is 16,384. The policy treats one observed byte as one estimated input-budget unit. A larger existing OpenCode `compaction.reserved` value is preserved and used as at least that much numerical reserve; that host setting is expressed in tokens.
-
-This is conservative admission, not an exact tokenizer count. The public hooks do not expose the final enabled tools, provider serialization, matching tokenizer or changes made by later plugins. Put OptChat last in the plugin list and leave room for provider and MCP overhead. These measures cannot establish a universal no-overflow guarantee.
-
-The pinned host awaits the [message transform before model conversion](https://github.com/anomalyco/opencode/blob/733b2c627e5aec39cb33cc22373bdce33053ef2c/packages/opencode/src/session/prompt.ts#L1255-L1286). Its [parameter hook runs before final tool preparation](https://github.com/anomalyco/opencode/blob/733b2c627e5aec39cb33cc22373bdce33053ef2c/packages/opencode/src/session/llm/request.ts#L114-L175), and the [public hook signatures](https://github.com/anomalyco/opencode/blob/733b2c627e5aec39cb33cc22373bdce33053ef2c/packages/plugin/src/index.ts#L247-L334) supply no final request or tokenizer. Those boundaries are why the adapter reports observed bytes and refuses known excess instead of claiming an exact token bound.
-
-The adapter waits, then refuses input that still exceeds this policy. It does not drop a tool call/result pair or automatically retarget the tree to every smaller model window. Choose a smaller `viewBytes`, reduce the active turn's text/tool output, or select a larger model when the error reports insufficient headroom. A smaller reserve is an explicit capacity-policy choice, not evidence that a provider will accept the request. Unknown or invalid model limits are rejected.
-
-The same capacity check applies to compressor children, whose output allocation is capped. Unmeasured background requests cannot reuse a conversation's admission snapshot. OpenCode's automatic title generation may therefore be unavailable; a manually titled session remains usable.
+Cancellation interrupts admission without fallback; valid summary work may remain reusable. Shutdown cancels owned compression and closes memory before releasing its writer lease. Corrupt storage and writer conflicts also block inference. Never edit append-only files to clear an error.
 
 ## Options
 
 | Option | Purpose |
 | --- | --- |
 | `directory` | Required absolute Linux root for session stores. |
-| `enabled` | Set to `false` for ordinary OpenCode behavior. |
-| `model` | Optional configured OpenCode provider/model for compression. |
-| `nodeBytes` | Maximum byte budget for a tree node. |
-| `viewBytes` | Maximum rendered historical view bytes, including its `<chat>` envelope. |
-| `compressionTimeoutMs` | Deadline for compressor calls and admission work. |
-| `contextReserveBytes` | Conservative allowance for request overhead absent from public hooks; default 16,384, minimum 1,024. |
-
-Keep default byte budgets until you have measured a reason to change them. An unusually small view budget can refuse inference when no already-built prefix fits it.
+| `enabled` | `false` leaves ordinary OpenCode behavior. |
+| `model` | Optional native provider/model reference for compression. |
+| `nodeBytes` | Maximum bytes per summary-tree node. |
+| `viewBytes` | Maximum historical view bytes, including the `<chat>` envelope. |
+| `compressionTimeoutMs` | Compression and admission deadline. |
+| `contextReserveBytes` | Overhead allowance; default 16,384, minimum 1,024. |
 
 ## Verify and update
 
-Run `bun run typecheck`, `bun test tests`, and the two smoke tests described in [development verification](development/opencode-verification.md). The OpenCode smoke uses the actual pinned host against a local synthetic model with isolated configuration and no provider credentials.
+Run the [development gates](development/opencode-verification.md), including both actual-host smokes. They use isolated settings and synthetic loopback models without external provider credentials. Follow [upstream updates](development/upstream-updates.md) to retain upstream Git history.
 
-Follow [upstream updates](development/upstream-updates.md) to bring changes from `ericjuta/omp-optchat` into this fork. Do not replace the upstream history with a copied source tree.
-
-Upstream has no root license at the recorded baseline. This fork preserves existing notices and makes no new licensing claim. Vendored skill licenses apply to those vendored materials.
+Upstream has no root license at the recorded baseline. Existing notices are preserved; this fork makes no new licensing claim. Vendored licenses apply to those materials.
