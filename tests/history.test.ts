@@ -530,6 +530,16 @@ const PNG_A = png(2, 3, 40).toString("base64");
 const PNG_B = png(1, 4, 200).toString("base64");
 const PNG_A_DESCRIPTOR = validateImage(PNG_A, "image/png").descriptor;
 
+test("legacy inline image import preserves OpenCode source identity", async () => {
+  await withRealMemory((memory) => {
+    const source = { host: "opencode", sessionID: "s", messageID: "m", partID: "p", slot: "file" } as const;
+    importHistory(memory, JSON.stringify({ kind: "note", text: "attachment", metadata: { source },
+      images: [{ ...PNG_A_DESCRIPTOR, order: 0, data: PNG_A }] }));
+    expect(memory.store.messages[0]?.metadata?.source).toEqual(source);
+    expect(memory.store.messages[0]?.metadata?.images).toHaveLength(1);
+  });
+});
+
 // Metadata refs and inline payloads, built from genuine bytes.
 function refOf(data: string, order: number): ImageAttachment {
   return { ...validateImage(data, "image/png").descriptor, order };

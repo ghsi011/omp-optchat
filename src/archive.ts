@@ -130,6 +130,29 @@ export interface ValidatedImage {
 export interface MessageMetadata {
   readonly work?: WorkMetadata;
   readonly images?: readonly ImageAttachment[];
+  readonly source?: SourceIdentity;
+}
+
+export interface SourceIdentity {
+  readonly host: "opencode";
+  readonly sessionID: string;
+  readonly messageID: string;
+  readonly partID: string;
+  readonly slot: "text" | "call" | "result" | "file";
+}
+
+function parseSource(value: unknown): SourceIdentity {
+  const row = plainRecord(value, ["host", "sessionID", "messageID", "partID", "slot"], [], "source identity");
+  if (row.host !== "opencode") fail("source identity", "unsupported host");
+  const slot = row.slot;
+  if (slot !== "text" && slot !== "call" && slot !== "result" && slot !== "file") {
+    fail("source identity", "unsupported slot");
+  }
+  return Object.freeze({ host: "opencode", slot,
+    sessionID: boundedText(row.sessionID, "source sessionID"),
+    messageID: boundedText(row.messageID, "source messageID"),
+    partID: boundedText(row.partID, "source partID"),
+  });
 }
 
 const workSources: Record<WorkSource, true> = { task: true, "async-result": true, "launch-completion": true };
@@ -216,11 +239,12 @@ function parseAttachments(value: unknown): readonly ImageAttachment[] {
  * frozen copies. Callers must still check kind coupling and image storage.
  */
 export function parseMetadata(value: unknown): MessageMetadata {
-  const row = plainRecord(value, [], ["work", "images"], "message metadata");
-  const result: { work?: WorkMetadata; images?: readonly ImageAttachment[] } = {};
+  const row = plainRecord(value, [], ["work", "images", "source"], "message metadata");
+  const result: { work?: WorkMetadata; images?: readonly ImageAttachment[]; source?: SourceIdentity } = {};
   if (hasOwn(row, "work")) result.work = parseWork(row.work);
   if (hasOwn(row, "images")) result.images = parseAttachments(row.images);
-  if (result.work === undefined && result.images === undefined) fail("message metadata", "must not be empty");
+  if (hasOwn(row, "source")) result.source = parseSource(row.source);
+  if (result.work === undefined && result.images === undefined && result.source === undefined) fail("message metadata", "must not be empty");
   return Object.freeze(result);
 }
 

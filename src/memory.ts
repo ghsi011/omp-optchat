@@ -229,6 +229,10 @@ function positive(value: number | undefined, fallback: number, name: string): nu
   return result;
 }
 
+export class ViewPrefixUnavailableError extends Error {
+  constructor(message: string) { super(message); this.name = "ViewPrefixUnavailableError"; }
+}
+
 /**
  * An append-only binary summary tree with a live, never-split view. Store owns
  * durability; call close() before closing Store, even after a cancelled turn.
@@ -362,6 +366,29 @@ export class Memory {
 
   render(): string {
     return chat(this.view.map((part) => this.renderPart(part)));
+  }
+
+  /** Read-only clipping of the saved view; never exposes a summary crossing the cutoff. */
+  renderPrefix(endExclusive: number): string {
+    if (!Number.isSafeInteger(endExclusive) || endExclusive < 0 || endExclusive > this.store.messages.length) {
+      throw new RangeError("Invalid view prefix boundary");
+    }
+    const parts: ViewPart[] = [];
+    const visit = (part: ViewPart): void => {
+      const width = 2 ** part.l;
+      if (part.i * width >= endExclusive) return;
+      if ((part.i + 1) * width <= endExclusive) {
+        if (!this.node(part)) throw new ViewPrefixUnavailableError("View prefix is not summarized yet");
+        parts.push(part);
+        return;
+      }
+      visit({ l: part.l - 1, i: part.i * 2 });
+      visit({ l: part.l - 1, i: part.i * 2 + 1 });
+    };
+    for (const part of this.view) visit(part);
+    const rendered = chat(parts.map((part) => this.renderPart(part)));
+    if (utf8Bytes(rendered) > this.budget) throw new ViewPrefixUnavailableError("View prefix exceeds viewBytes; increase the configured budget");
+    return rendered;
   }
 
   /**
