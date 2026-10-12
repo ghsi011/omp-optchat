@@ -30,7 +30,7 @@ The completed items in the first list describe the historical v1 implementation.
 - [x] (2026-10-12 18:43Z) Implement the v2-only adapter and deterministic regression tests.
 - [x] (2026-10-12 18:43Z) Pass the real v2 loopback fixture and both OMP cohorts with the final dependencies.
 - [x] (2026-10-12 18:44Z) Complete fresh independent reviews and corrections, documentation and upstream rehearsal.
-- [ ] Push the existing draft PR and verify all actual CI jobs on the exact new head.
+- [x] (2026-10-12 18:49Z) Push the existing draft PR and verify all actual CI jobs on v2 head `7ab4b3abbcf8a3727d3c0df7481e02d0b2cd5a28`. The final documentation record also receives an exact-head CI check; the PR carries that live result.
 
 ## Surprises & Discoveries
 
@@ -108,13 +108,13 @@ The existing core constructor is `new Memory(store, summarize, options)`. `Summa
 
 The user subsequently changed the target to OpenCode 2 only. The v1 results below are historical evidence, not v2 acceptance. The new pin is OpenCode 2.0.27 at official source `4d9678a79d6367ad1257c258049075e7a2d0c6c8`. Both native Windows and WSL executables passed isolated version checks. Plugin and client development dependencies use 2.0.27. Effect uses the host's 4.0.1 dependency.
 
-The v2 implementation and local acceptance gates are complete. Independent source and design reviews verified the single awaited context hook, durable idle turn boundaries, cancellation, and full-history recovery. Production and real-host fixture owners used disjoint files and separate WSL roots. The shared Store and Memory remain the reuse boundary. Publication still requires actual GitHub CI on the exact new remote head.
+The v2 implementation and acceptance gates are complete. Independent source and design reviews verified the single awaited context hook, durable idle turn boundaries, cancellation, and full-history recovery. Production and real-host fixture owners used disjoint files and separate WSL roots. The shared Store and Memory remain the reuse boundary. Actual [GitHub CI run 38293121670](https://github.com/ghsi011/omp-optchat/actions/runs/38293121670) passed all three jobs on remote head `7ab4b3abbcf8a3727d3c0df7481e02d0b2cd5a28`; its push-triggered sibling run also passed. The pstack watcher reported READY with the user's required draft state allowed and no review threads. The PR remains unmerged.
 
 Both OMP cohorts passed 1,453 tests, with three existing skips and zero failures. Both typechecks and real OMP smokes passed. The static audit found no violations in 23 files. The real OpenCode 2.0.27 fixture passed with three processes, four actual tools, binary summary merges, exact raw retrieval, slow and failed compression, independent sessions, cancellation, capacity refusal and native crash recovery. The crash resumed with one new provider request and repeated no completed tools. The 55,109-byte capacity case exceeded its 19,904-unit allowance and made zero provider calls.
 
 The independent review found and corrected lost structured compressor feedback. Another review correction ensures generation cancellation cleanup finishes before the memory owner closes. Regressions cover both. Standards corrections retain native session ID types, correlate safe diagnostics and bound timeout-test observations. No concrete review finding remains unresolved.
 
-The first published head's actual GitHub CI exposed an OMP latest-cohort fixture issue. OMP 18.10.2 defaults structured child output off. Explicitly enabling `task.structured` restores the existing synthetic child's `yield` contract. The unchanged semantic smoke assertions pass on both 18.9.1 and 18.10.2. New-head GitHub CI remains a required final gate.
+The first published head's actual GitHub CI exposed an OMP latest-cohort fixture issue. OMP 18.10.2 defaults structured child output off. Explicitly enabling `task.structured` restores the existing synthetic child's `yield` contract. The unchanged semantic smoke assertions pass on both 18.9.1 and 18.10.2, locally and in the successful v2 GitHub run.
 
 The historical v1 feature passed type checking, the static audit of 18 new TypeScript files, and 1,450 tests with three existing skips and zero failures. Both v1-era actual-host smokes passed locally before GitHub exposed the latest-OMP fixture failure. These results do not certify v2. The initial missing-workflow conclusion is superseded by the official Poteto Mode discovery.
 
@@ -129,3 +129,5 @@ Revision note (2026-10-12 17:10Z): recorded final test and host evidence, indepe
 Revision note (2026-10-12 17:13Z): recorded the verified fork push and draft pull request.
 
 Revision note (2026-10-12 18:44Z): replaced the v1 implementation instructions with the sole supported v2 target; recorded local runtime installation, final native-host evidence, review corrections, both OMP regression cohorts and the v2 upstream rehearsal.
+
+Revision note (2026-10-12 18:49Z): recorded the verified v2 remote head and successful actual GitHub jobs. The draft PR remains the live source for CI on later documentation-only commits.
