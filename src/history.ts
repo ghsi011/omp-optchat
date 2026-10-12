@@ -118,6 +118,7 @@ function parseRecord(text: string, line: number): ImportRecord {
       // Legacy exports carried payloads without metadata refs; the payloads are the refs.
       metadata = admitMetadata({
         ...(metadata?.work === undefined ? {} : { work: metadata.work }),
+        ...(metadata?.source === undefined ? {} : { source: metadata.source }),
         images: inline.map((image) => image.attachment),
       }, line);
     } else if (refs.length !== inline.length || inline.some((image, k) =>
