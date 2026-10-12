@@ -2,6 +2,8 @@
 
 An OMP extension implementing [Victor Taelin's OptChat specification](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449): one durable chat, a binary tree of contextual summaries, and a fresh model context for each user turn. Original text remains retrievable with `zoom`; summaries are navigation, not a replacement for the log.
 
+This fork also has a separate [OpenCode adapter](docs/opencode.md) for OpenCode 1.19.0 on Linux or WSL. It shares the durable memory core and provides the four basic memory tools. The OMP instructions and System One features below still apply to the original OMP entry point.
+
 ## At a glance
 
 - **One chat that never ends.** Every user message, reply, tool call, tool result and subagent report is appended to a local, fsynced log under OMP's agent directory, one store per git worktree. Nothing is ever deleted or rewritten.

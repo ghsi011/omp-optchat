@@ -38,3 +38,29 @@ jobs:
       - run: bun run smoke
         env:
           OPTCHAT_SMOKE_OMP: ./node_modules/.bin/omp
+  opencode:
+    name: OpenCode 1.19.0 loopback smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - name: Install pinned dependencies without lifecycle scripts
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Download the pinned official OpenCode binary
+        run: |
+          mkdir -p "$RUNNER_TEMP/optchat-opencode"
+          cd "$RUNNER_TEMP/optchat-opencode"
+          curl --fail --location --retry 3 \
+            https://github.com/anomalyco/opencode/releases/download/v1.19.0/opencode-linux-x64-baseline.tar.gz \
+            --output opencode.tar.gz
+          printf '%s  %s\n' \
+            6334d70db3990721ea454357e9cf2573c8685524ad7769af9d52cbffb7008438 \
+            opencode.tar.gz | sha256sum --check
+          tar -xzf opencode.tar.gz
+      - name: Verify the real host with a local model fixture
+        run: bun run smoke:opencode
+        env:
+          OPTCHAT_SMOKE_OPENCODE: ${{ runner.temp }}/optchat-opencode/opencode
